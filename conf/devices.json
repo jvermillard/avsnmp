@@ -1,0 +1,9 @@
+{
+    "device 1" : {
+        "host" : "127.0.0.1",
+        "port" : 121,
+        "snmpcommunity" : "public",
+        "password" : "p4ssw0rd"
+    }
+
+}

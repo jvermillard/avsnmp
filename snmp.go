@@ -7,6 +7,8 @@ import (
 	"github.com/alouca/gosnmp"
 	"net/http"
 	"os"
+	"sync"
+	"time"
 )
 
 const (
@@ -19,86 +21,108 @@ const (
 	FW_OID      = ".1.3.6.1.2.1.1.1.0"
 )
 
-func main() {
-	fmt.Printf("AirVantage SNMP gateway\n")
+// latch for
+var w sync.WaitGroup
 
-	if len(os.Args) != 5 {
-		fmt.Printf("Usage : avsnmp [device host] [community] [platform] [password]\n\n[device host] is the IP address or the hostname of the SNMP device\n[community] the SNMP community (ex: public)\n[platform] can be na,eu,edge,etc..\n[password] is the password associated with the device\n")
-		os.Exit(1)
-	}
-
-	s, err := gosnmp.NewGoSNMP(os.Args[1], os.Args[2], gosnmp.Version1, 5)
-
+func pollDevice(name string, device Device, platform string) {
+	s, err := gosnmp.NewGoSNMP(device.Host, device.SnmpCommunity, gosnmp.Version1, 5)
 	if err != nil {
 		fmt.Printf("err : %s\n", err)
 		return
 	}
 
-	var values = make(map[string]interface{})
+	for {
+		var values = make(map[string]interface{})
 
-	resp, err := s.Get(SN_OID)
+		resp, err := s.Get(SN_OID)
 
-	if err == nil {
-		fmt.Printf("serial number: %s\n", string(resp.Variables[0].Value.([]uint8)))
+		if err == nil {
+			fmt.Printf("serial number: %s\n", string(resp.Variables[0].Value.([]uint8)))
 
-		values["SERIAL_NUMBER"] = string(resp.Variables[0].Value.([]uint8))
+			values["SERIAL_NUMBER"] = string(resp.Variables[0].Value.([]uint8))
 
-	} else {
-		fmt.Printf("SNMP err : %s\n", err)
+		} else {
+			fmt.Printf("SNMP err : %s\n", err)
+		}
+
+		resp, err = s.Get(SERVICE_OID)
+		if err == nil {
+			fmt.Printf("service type: %s\n", string(resp.Variables[0].Value.([]uint8)))
+
+			values["_NETWORK_SERVICE_TYPE"] = string(resp.Variables[0].Value.([]uint8))
+
+		} else {
+			fmt.Printf("SNMP err : %s\n", err)
+		}
+
+		resp, err = s.Get(RSSI_OID)
+
+		if err == nil {
+			fmt.Printf("RSSI: %d\n", resp.Variables[0].Value.(int))
+			values["_RSSI"] = resp.Variables[0].Value.(int)
+
+		} else {
+			fmt.Printf("SNMP err : %s\n", err)
+		}
+
+		resp, err = s.Get(ECIO_OID)
+
+		if err == nil {
+			fmt.Printf("ECIO: %d\n", resp.Variables[0].Value.(int))
+			values["_ECIO"] = resp.Variables[0].Value.(int)
+		} else {
+			fmt.Printf("SNMP err : %s\n", err)
+		}
+
+		resp, err = s.Get(FW_OID)
+
+		if err == nil {
+			fmt.Printf("FW: %s\n", string(resp.Variables[0].Value.([]uint8)))
+			values["FW"] = string(resp.Variables[0].Value.([]uint8))
+
+		} else {
+			fmt.Printf("SNMP err : %s\n", err)
+		}
+
+		resp, err = s.Get(RM_FW_OID)
+
+		if err == nil {
+			//		fmt.Printf("response: %s\n", resp)
+			fmt.Printf("Radio Module FW: %s\n", string(resp.Variables[0].Value.([]uint8)))
+			values["RMFW"] = string(resp.Variables[0].Value.([]uint8))
+
+		} else {
+			fmt.Printf("SNMP err : %s\n", err)
+		}
+		if values["SERIAL_NUMBER"] != nil {
+			dataPush(values, platform, values["SERIAL_NUMBER"].(string), device.Password)
+		}
+
+		time.Sleep(1000 * time.Millisecond)
+	}
+	w.Done()
+}
+
+func main() {
+	fmt.Printf("AirVantage SNMP gateway\n")
+
+	if len(os.Args) != 2 {
+		fmt.Printf("Usage : avsnmp [platform]\n\n platform: edge,na,eu,etc\n")
+		os.Exit(1)
+	}
+	// load configuration from json
+
+	LoadFromJson("conf/devices.json")
+
+	w.Add(len(Devices))
+	// start the web server
+	go RunHttpServer()
+
+	for k, v := range Devices {
+		go pollDevice(k, v, os.Args[1])
 	}
 
-	resp, err = s.Get(SERVICE_OID)
-	if err == nil {
-		fmt.Printf("service type: %s\n", string(resp.Variables[0].Value.([]uint8)))
-
-		values["_NETWORK_SERVICE_TYPE"] = string(resp.Variables[0].Value.([]uint8))
-
-	} else {
-		fmt.Printf("SNMP err : %s\n", err)
-	}
-
-	resp, err = s.Get(RSSI_OID)
-
-	if err == nil {
-		fmt.Printf("RSSI: %d\n", resp.Variables[0].Value.(int))
-		values["_RSSI"] = resp.Variables[0].Value.(int)
-
-	} else {
-		fmt.Printf("SNMP err : %s\n", err)
-	}
-
-	resp, err = s.Get(ECIO_OID)
-
-	if err == nil {
-		fmt.Printf("ECIO: %d\n", resp.Variables[0].Value.(int))
-		values["_ECIO"] = resp.Variables[0].Value.(int)
-	} else {
-		fmt.Printf("SNMP err : %s\n", err)
-	}
-
-	resp, err = s.Get(FW_OID)
-
-	if err == nil {
-		fmt.Printf("FW: %s\n", string(resp.Variables[0].Value.([]uint8)))
-		values["FW"] = string(resp.Variables[0].Value.([]uint8))
-
-	} else {
-		fmt.Printf("SNMP err : %s\n", err)
-	}
-
-	resp, err = s.Get(RM_FW_OID)
-
-	if err == nil {
-		//		fmt.Printf("response: %s\n", resp)
-		fmt.Printf("Radio Module FW: %s\n", string(resp.Variables[0].Value.([]uint8)))
-		values["RMFW"] = string(resp.Variables[0].Value.([]uint8))
-
-	} else {
-		fmt.Printf("SNMP err : %s\n", err)
-	}
-	if values["SERIAL_NUMBER"] != nil {
-		dataPush(values, os.Args[3], values["SERIAL_NUMBER"].(string), os.Args[4])
-	}
+	w.Wait()
 }
 
 // push a data to airvantage using HTTP REST for devices

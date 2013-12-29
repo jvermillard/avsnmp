@@ -11,20 +11,12 @@ import (
 	"time"
 )
 
-const (
-	_           = iota
-	ECIO_OID    = ".1.3.6.1.4.1.20992.1.2.2.1.6.0"
-	RSSI_OID    = ".1.3.6.1.4.1.20992.1.2.2.1.4.0"
-	SERVICE_OID = ".1.3.6.1.4.1.20992.1.2.2.1.10.0"
-	SN_OID      = ".1.3.6.1.4.1.20992.1.2.2.1.7.0"
-	RM_FW_OID   = ".1.3.6.1.4.1.20992.1.2.2.1.8.0"
-	FW_OID      = ".1.3.6.1.2.1.1.1.0"
-)
-
 // latch for
 var w sync.WaitGroup
 
-func pollDevice(name string, device Device, platform string) {
+func pollDevice(name string, device *Device, platform string) {
+	fmt.Printf("community: %s\n", device.SnmpCommunity)
+
 	s, err := gosnmp.NewGoSNMP(device.Host, device.SnmpCommunity, gosnmp.Version1, 5)
 	if err != nil {
 		fmt.Printf("err : %s\n", err)
@@ -34,71 +26,36 @@ func pollDevice(name string, device Device, platform string) {
 	for {
 		var values = make(map[string]interface{})
 
-		resp, err := s.Get(SN_OID)
+		fmt.Printf("Polling device with model %s\n", device.Model)
 
-		if err == nil {
-			fmt.Printf("serial number: %s\n", string(resp.Variables[0].Value.([]uint8)))
+		// get the model
 
-			values["SERIAL_NUMBER"] = string(resp.Variables[0].Value.([]uint8))
+		model := Models[device.Model]
 
-		} else {
-			fmt.Printf("SNMP err : %s\n", err)
+		for k, v := range model {
+			fmt.Printf("polling '%s'\n", k)
+			resp, err := s.Get(k)
+			if err != nil {
+				fmt.Printf("SNMP err : %s\n", err)
+			} else {
+				pdu := resp.Variables[0]
+				var t = pdu.Type
+				switch t {
+				case gosnmp.Integer:
+					fmt.Println("Integer!")
+					values[v] = pdu.Value.(int)
+				case gosnmp.OctetString:
+					fmt.Println("OctetString!")
+					values[v] = string(pdu.Value.([]uint8))
+				default:
+					fmt.Printf("unknown type: %d (%s)\n", t, v)
+				}
+			}
 		}
 
-		resp, err = s.Get(SERVICE_OID)
-		if err == nil {
-			fmt.Printf("service type: %s\n", string(resp.Variables[0].Value.([]uint8)))
-
-			values["_NETWORK_SERVICE_TYPE"] = string(resp.Variables[0].Value.([]uint8))
-
-		} else {
-			fmt.Printf("SNMP err : %s\n", err)
-		}
-
-		resp, err = s.Get(RSSI_OID)
-
-		if err == nil {
-			fmt.Printf("RSSI: %d\n", resp.Variables[0].Value.(int))
-			values["_RSSI"] = resp.Variables[0].Value.(int)
-
-		} else {
-			fmt.Printf("SNMP err : %s\n", err)
-		}
-
-		resp, err = s.Get(ECIO_OID)
-
-		if err == nil {
-			fmt.Printf("ECIO: %d\n", resp.Variables[0].Value.(int))
-			values["_ECIO"] = resp.Variables[0].Value.(int)
-		} else {
-			fmt.Printf("SNMP err : %s\n", err)
-		}
-
-		resp, err = s.Get(FW_OID)
-
-		if err == nil {
-			fmt.Printf("FW: %s\n", string(resp.Variables[0].Value.([]uint8)))
-			values["FW"] = string(resp.Variables[0].Value.([]uint8))
-
-		} else {
-			fmt.Printf("SNMP err : %s\n", err)
-		}
-
-		resp, err = s.Get(RM_FW_OID)
-
-		if err == nil {
-			//		fmt.Printf("response: %s\n", resp)
-			fmt.Printf("Radio Module FW: %s\n", string(resp.Variables[0].Value.([]uint8)))
-			values["RMFW"] = string(resp.Variables[0].Value.([]uint8))
-
-		} else {
-			fmt.Printf("SNMP err : %s\n", err)
-		}
-		if values["SERIAL_NUMBER"] != nil {
-			dataPush(values, platform, values["SERIAL_NUMBER"].(string), device.Password)
-		}
-
-		time.Sleep(1000 * time.Millisecond)
+		fmt.Println("push...")
+		dataPush(values, platform, device.Identifier, device.Password)
+		time.Sleep(time.Duration(device.Polling) * time.Second)
 	}
 	w.Done()
 }
@@ -112,14 +69,15 @@ func main() {
 	}
 	// load configuration from json
 
-	LoadFromJson("conf/devices.json")
+	LoadModels("conf/model.json")
+	LoadDevices("conf/devices.json")
 
 	w.Add(len(Devices))
 	// start the web server
 	go RunHttpServer()
 
 	for k, v := range Devices {
-		go pollDevice(k, v, os.Args[1])
+		go pollDevice(k, &v, os.Args[1])
 	}
 
 	w.Wait()
